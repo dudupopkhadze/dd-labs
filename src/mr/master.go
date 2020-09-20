@@ -7,7 +7,11 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"sync"
 )
+
+//assigned ass job's workerId when jobs has no worker
+const NO_WORKER = -1
 
 //JobType  what job worker has
 type JobType string
@@ -36,7 +40,7 @@ const (
 	loafting          = "loafting"
 )
 
-//isValid checks if given jobtype has valid string value
+//isValid checks if given jobstate has valid string value
 func (js JobState) IsValid() error {
 	switch js {
 	case active, done, loafting:
@@ -45,9 +49,27 @@ func (js JobState) IsValid() error {
 	return errors.New("Invalid Job state")
 }
 
-type Master struct {
-	// Your definitions here.
+//Job struct
+type Job struct {
+	jobID    int
+	workerID int
+	files    []string
+	jobState JobState
+	JobType  JobType
+}
 
+//Master struct
+type Master struct {
+	nReduce    int
+	files      []string
+	jobs       map[int]Job
+	tempFiles  []string
+	nextWorker int        //worker id
+	nextJob    int        // job id
+	fMaps      int        //dinished maps
+	fReduces   int        // finished reduces
+	mlock      sync.Mutex // for ensuring fMaps valide value
+	rlock      sync.Mutex // for ensuring fReduces valide value
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -78,7 +100,7 @@ func (m *Master) server() {
 	go http.Serve(l, nil)
 }
 
-//
+//Done
 // main/mrmaster.go calls Done() periodically to find out
 // if the entire job has finished.
 //
@@ -90,15 +112,40 @@ func (m *Master) Done() bool {
 	return ret
 }
 
+func (m *Master) initJobs() {
+	for _, file := range m.files {
+		newJobID := m.nextJob
+		m.nextJob++
+		newJob := Job{
+			jobID:    newJobID,
+			JobType:  mapJob,
+			files:    []string{file},
+			jobState: loafting,
+			workerID: NO_WORKER,
+		}
+		m.jobs[newJobID] = newJob
+
+	}
+}
+
 //
 // create a Master.
 // main/mrmaster.go calls this function.
 // nReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{}
-
-	// Your code here.
+	m := Master{
+		tempFiles:  make([]string, 0),
+		nextJob:    0,
+		nextWorker: 0,
+		jobs:       make(map[int]Job),
+		fMaps:      0,
+		fReduces:   0,
+		mlock:      sync.Mutex{},
+		rlock:      sync.Mutex{},
+		nReduce:    nReduce,
+		files:      files,
+	}
 
 	m.server()
 	return &m
