@@ -10,8 +10,11 @@ import (
 	"sync"
 )
 
-//assigned ass job's workerId when jobs has no worker
-const NO_WORKER = -1
+//noWorker assigned ass job's workerId when jobs has no worker
+const noWorker = -1
+
+//noReduceJobID assigned to job.reduceId when it has no reduce job yet
+const noReduceJobID = -1
 
 //JobType  what job worker has
 type JobType string
@@ -22,7 +25,7 @@ const (
 	noJob             = "noJob"
 )
 
-//isValid checks if given jobtype has valid string value
+//IsValid checks if given jobtype has valid string value
 func (jt JobType) IsValid() error {
 	switch jt {
 	case mapJob, reduceJob, noJob:
@@ -40,7 +43,7 @@ const (
 	loafting          = "loafting"
 )
 
-//isValid checks if given jobstate has valid string value
+//IsValid checks if given jobstate has valid string value
 func (js JobState) IsValid() error {
 	switch js {
 	case active, done, loafting:
@@ -56,6 +59,8 @@ type Job struct {
 	files    []string
 	jobState JobState
 	JobType  JobType
+	mapID    int
+	reduceID int
 }
 
 //Master struct
@@ -64,7 +69,7 @@ type Master struct {
 	files      []string
 	jobs       map[int]Job
 	tempFiles  []string
-	nextWorker int        //worker id
+	nextWorker int        //next free worker id
 	nextJob    int        // job id
 	fMaps      int        //dinished maps
 	fReduces   int        // finished reduces
@@ -74,13 +79,24 @@ type Master struct {
 
 // Your code here -- RPC handlers for the worker to call.
 
+///for rpc communications
+
+//InitWorker tells worker it's id
+func (m *Master) InitWorker(
+	args *InitWorkerArgs,
+	reply *InitWorkerResponse) error {
+	reply.ID = m.nextWorker
+	m.nextWorker++
+	return nil
+}
+
 //
 // an example RPC handler.
 //
 // the RPC argument and reply types are defined in rpc.go.
 //
 func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
+	reply.Y = args.X + 2
 	return nil
 }
 
@@ -100,8 +116,7 @@ func (m *Master) server() {
 	go http.Serve(l, nil)
 }
 
-//Done
-// main/mrmaster.go calls Done() periodically to find out
+//Done main/mrmaster.go calls Done() periodically to find out
 // if the entire job has finished.
 //
 func (m *Master) Done() bool {
@@ -121,15 +136,14 @@ func (m *Master) initJobs() {
 			JobType:  mapJob,
 			files:    []string{file},
 			jobState: loafting,
-			workerID: NO_WORKER,
+			workerID: noWorker,
 		}
 		m.jobs[newJobID] = newJob
 
 	}
 }
 
-//
-// create a Master.
+//MakeMaster // create a Master.
 // main/mrmaster.go calls this function.
 // nReduce is the number of reduce tasks to use.
 //

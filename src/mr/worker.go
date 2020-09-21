@@ -1,10 +1,11 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-
+import (
+	"fmt"
+	"hash/fnv"
+	"log"
+	"net/rpc"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,7 +25,6 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
@@ -32,10 +32,24 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	ID := CallInit()
+	if ID == -1 {
+		fmt.Printf("pizdec\n")
+	}
+	fmt.Printf("success\n")
+}
 
-	// uncomment to send the Example RPC to the master.
-	// CallExample()
+//CallInit gets id from master through rpc
+func CallInit() (ID int) {
+	arg := InitWorkerArgs{}
+	res := InitWorkerResponse{}
 
+	success := call("Master.InitWorker", &arg, &res)
+	if !success {
+		return -1
+	}
+	ID = res.ID
+	return
 }
 
 //

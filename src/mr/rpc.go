@@ -6,8 +6,10 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
-import "strconv"
+import (
+	"os"
+	"strconv"
+)
 
 //
 // example to show how to declare the arguments
@@ -22,8 +24,28 @@ type ExampleReply struct {
 	Y int
 }
 
-// Add your RPC definitions here.
+//HandMeJobArg for calling master's handmeajob
+type HandMeJobArg struct{}
 
+type HandMeJobResponse struct {
+	JobID    int
+	Files    []string
+	JobType  JobType
+	MapID    int
+	ReduceID int
+	NReduce  int
+}
+
+//InitWorkerArgs args for master's initme
+type InitWorkerArgs struct{}
+
+// InitWorkerResponse response for master's InitWorker
+// returns id for this worker
+type InitWorkerResponse struct {
+	ID int
+}
+
+// Add your RPC definitions here.
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the master.
