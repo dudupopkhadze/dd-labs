@@ -34,9 +34,26 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 	ID := CallInit()
 	if ID == -1 {
-		fmt.Printf("pizdec\n")
+		log.Fatalln("pizdec")
 	}
-	fmt.Printf("success\n")
+
+	givenJob := CallHandOutJob(ID)
+	fmt.Printf("success  %v\n", givenJob.JobID)
+}
+
+//CallHandOutJob gets jobb from master if any job is loafting
+func CallHandOutJob(ID int) (res HandOutJobResponse) {
+	arg := HandOutJobArg{ID: ID}
+	res = HandOutJobResponse{}
+
+	success := call("Master.HandOutJob", &arg, &res)
+	if !success {
+		fmt.Printf("error handmejoob")
+	}
+
+	fmt.Printf("sucdsadsadcess  %v\n", res.JobID)
+
+	return
 }
 
 //CallInit gets id from master through rpc

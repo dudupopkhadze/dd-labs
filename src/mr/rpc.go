@@ -24,10 +24,11 @@ type ExampleReply struct {
 	Y int
 }
 
-//HandMeJobArg for calling master's handmeajob
-type HandMeJobArg struct{}
+//HandOutJobArg for calling master's handajob
+type HandOutJobArg struct{ ID int }
 
-type HandMeJobResponse struct {
+//HandOutJobResponse response type from master's HandOutJob
+type HandOutJobResponse struct {
 	JobID    int
 	Files    []string
 	JobType  JobType

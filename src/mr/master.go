@@ -2,6 +2,7 @@ package mr
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -54,7 +55,7 @@ func (js JobState) IsValid() error {
 
 //Job struct
 type Job struct {
-	jobID    int
+	ID       int
 	workerID int
 	files    []string
 	jobState JobState
@@ -75,11 +76,40 @@ type Master struct {
 	fReduces   int        // finished reduces
 	mlock      sync.Mutex // for ensuring fMaps valide value
 	rlock      sync.Mutex // for ensuring fReduces valide value
+	jlock      sync.Mutex // for locking jobs while handing out jobs
 }
 
-// Your code here -- RPC handlers for the worker to call.
-
 ///for rpc communications
+
+//HandOutJob hands out idle job to worker if it exists
+func (m *Master) HandOutJob(
+	arg *HandOutJobArg,
+	res *HandOutJobResponse) error {
+	m.jlock.Lock()
+
+	for _, job := range m.jobs {
+		fmt.Printf("%v\n", job.jobState)
+		if job.jobState == loafting {
+			res.Files = job.files
+			res.JobID = job.ID
+			res.NReduce = m.nReduce
+			res.MapID = job.mapID
+			res.JobType = job.JobType
+			res.ReduceID = job.reduceID
+
+			job.jobState = active
+			job.workerID = arg.ID
+			m.jobs[job.ID] = job
+
+			break
+		}
+	}
+
+	//unlock when done using jobs
+	m.jlock.Unlock()
+
+	return nil
+}
 
 //InitWorker tells worker it's id
 func (m *Master) InitWorker(
@@ -131,12 +161,15 @@ func (m *Master) initJobs() {
 	for _, file := range m.files {
 		newJobID := m.nextJob
 		m.nextJob++
+		fmt.Printf("id %v\n", newJobID)
 		newJob := Job{
-			jobID:    newJobID,
+			ID:       newJobID,
 			JobType:  mapJob,
 			files:    []string{file},
 			jobState: loafting,
 			workerID: noWorker,
+			mapID:    newJobID,
+			reduceID: noReduceJobID,
 		}
 		m.jobs[newJobID] = newJob
 
@@ -157,9 +190,12 @@ func MakeMaster(files []string, nReduce int) *Master {
 		fReduces:   0,
 		mlock:      sync.Mutex{},
 		rlock:      sync.Mutex{},
+		jlock:      sync.Mutex{},
 		nReduce:    nReduce,
 		files:      files,
 	}
+
+	m.initJobs()
 
 	m.server()
 	return &m
