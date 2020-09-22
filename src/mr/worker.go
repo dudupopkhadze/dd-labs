@@ -40,9 +40,8 @@ func MapOverFile(
 
 	r, err := ioutil.ReadAll(openedFile)
 	if err != nil {
-		log.Fatalln(err)
+		log.Fatalln("error reading file for map ")
 	}
-
 	currentKeyValue = mapFN(file, string(r))
 	return
 }
@@ -51,13 +50,25 @@ func MapOverFile(
 func Map(
 	ID int,
 	mapFN func(string, string) []KeyValue,
-	files []string,
-	mapID int,
-	nReduce int) {
+	files []string, mapID int, NReduce int) (generatedFileNames []string) {
 	keyValues := make([]KeyValue, 0)
 	for _, file := range files {
 		keyValues = append(keyValues, MapOverFile(file, mapFN)...)
 	}
+	generatedFileNames = make([]string, len(keyValues))
+	for _, keyValue := range keyValues {
+		generatedFileName := fmt.Sprintf("mr -%v-%v-%v", mapID, ihash(keyValue.Key)%NReduce, ID)
+		r, err := os.OpenFile(generatedFileName,
+			os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Fatalln(err)
+		}
+		defer r.Close()
+		generatedFileNames = append(generatedFileNames, generatedFileName)
+
+		fmt.Fprintf(r, "%v %v\n", keyValue.Key, keyValue.Value)
+	}
+	return
 }
 
 // WorkUntilDeath wants to get job
