@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -27,12 +26,12 @@ const (
 )
 
 //IsValid checks if given jobtype has valid string value
-func (jt JobType) IsValid() error {
+func (jt JobType) IsValid() bool {
 	switch jt {
 	case mapJob, reduceJob, noJob:
-		return nil
+		return true
 	}
-	return errors.New("Invalid Job type")
+	return false
 }
 
 //JobState represents in which state given job is
@@ -45,12 +44,12 @@ const (
 )
 
 //IsValid checks if given jobstate has valid string value
-func (js JobState) IsValid() error {
+func (js JobState) IsValid() bool {
 	switch js {
 	case active, done, loafting:
-		return nil
+		return true
 	}
-	return errors.New("Invalid Job state")
+	return false
 }
 
 //Job struct
@@ -113,7 +112,7 @@ func (m *Master) HandOutJob(
 
 //InitWorker tells worker it's id
 func (m *Master) InitWorker(
-	args *InitWorkerArgs,
+	args *RPCEmptyArgument,
 	reply *InitWorkerResponse) error {
 	reply.ID = m.nextWorker
 	m.nextWorker++

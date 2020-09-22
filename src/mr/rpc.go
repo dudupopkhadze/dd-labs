@@ -24,6 +24,9 @@ type ExampleReply struct {
 	Y int
 }
 
+//RPCEmptyArgument args
+type RPCEmptyArgument struct{}
+
 //HandOutJobArg for calling master's handajob
 type HandOutJobArg struct{ ID int }
 
@@ -36,9 +39,6 @@ type HandOutJobResponse struct {
 	ReduceID int
 	NReduce  int
 }
-
-//InitWorkerArgs args for master's initme
-type InitWorkerArgs struct{}
 
 // InitWorkerResponse response for master's InitWorker
 // returns id for this worker

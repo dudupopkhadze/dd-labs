@@ -3,8 +3,10 @@ package mr
 import (
 	"fmt"
 	"hash/fnv"
+	"io/ioutil"
 	"log"
 	"net/rpc"
+	"os"
 )
 
 //
@@ -25,20 +27,69 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+//MapOverFile maps given func over given file's content
+func MapOverFile(
+	file string,
+	mapFN func(string, string) []KeyValue,
+) (currentKeyValue []KeyValue) {
+	openedFile, err := os.Open(file)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer openedFile.Close()
+
+	r, err := ioutil.ReadAll(openedFile)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	currentKeyValue = mapFN(file, string(r))
+	return
+}
+
+//Map handles mapjob
+func Map(
+	ID int,
+	mapFN func(string, string) []KeyValue,
+	files []string,
+	mapID int,
+	nReduce int) {
+	keyValues := make([]KeyValue, 0)
+	for _, file := range files {
+		keyValues = append(keyValues, MapOverFile(file, mapFN)...)
+	}
+}
+
+// WorkUntilDeath wants to get job
+func WorkUntilDeath(ID int) {
+	for {
+
+		givenJob := CallHandOutJob(ID)
+
+		if !givenJob.JobType.IsValid() {
+			log.Fatalln("unsuported job type")
+		}
+
+		switch givenJob.JobType {
+		case mapJob:
+			fmt.Print("map")
+		case reduceJob:
+			fmt.Print("red")
+
+		}
+	}
+}
+
 //
 // main/mrworker.go calls this function.
 //
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-
-	// Your worker implementation here.
 	ID := CallInit()
 	if ID == -1 {
 		log.Fatalln("pizdec")
 	}
-
-	givenJob := CallHandOutJob(ID)
-	fmt.Printf("success  %v\n", givenJob.JobID)
+	WorkUntilDeath(ID)
 }
 
 //CallHandOutJob gets jobb from master if any job is loafting
@@ -58,7 +109,7 @@ func CallHandOutJob(ID int) (res HandOutJobResponse) {
 
 //CallInit gets id from master through rpc
 func CallInit() (ID int) {
-	arg := InitWorkerArgs{}
+	arg := RPCEmptyArgument{}
 	res := InitWorkerResponse{}
 
 	success := call("Master.InitWorker", &arg, &res)
