@@ -7,14 +7,23 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 )
+
+//singleJobSecondsLimit if workred work longer thank singleJobSecondsLimit second on a job - job is reasigned
+const singleJobSecondsLimit = 10
 
 //noWorker assigned ass job's workerId when jobs has no worker
 const noWorker = -1
 
 //noReduceJobID assigned to job.reduceId when it has no reduce job yet
 const noReduceJobID = -1
+
+//noMapJobID assigned to job.mapid when it has no map job yet
+const noMapJobID = -1
 
 //JobType  what job worker has
 type JobType string
@@ -54,13 +63,14 @@ func (js JobState) IsValid() bool {
 
 //Job struct
 type Job struct {
-	ID       int
-	workerID int
-	files    []string
-	jobState JobState
-	JobType  JobType
-	mapID    int
-	reduceID int
+	ID        int
+	workerID  int
+	files     []string
+	jobState  JobState
+	timestamp time.Time
+	JobType   JobType
+	mapID     int
+	reduceID  int
 }
 
 //Master struct
@@ -78,17 +88,101 @@ type Master struct {
 	jlock      sync.Mutex // for locking jobs while handing out jobs
 }
 
+func fileNameSplitFn(rn rune) bool {
+	return rn == '-'
+}
+
+func gentNewFileName(isMap bool, currentFileName string) string {
+	splitedCurrentName := strings.FieldsFunc(currentFileName, fileNameSplitFn)
+	if isMap {
+		return fmt.Sprintf("mr-%v-%v", splitedCurrentName[1], splitedCurrentName[2])
+	}
+
+	return fmt.Sprintf("mr-out-%v", splitedCurrentName[2])
+
+}
+
+func getReduceIDFromFileName(currentFileName string) (ID int) {
+	splitedCurrentName := strings.FieldsFunc(currentFileName, fileNameSplitFn)
+	ID, err := strconv.Atoi(splitedCurrentName[2])
+	if err != nil {
+		log.Fatalln("Error parsing file name for getReduceId")
+	}
+	return
+}
+
+func shouldReasignJob(jobStartTime time.Time) bool {
+	return time.Now().Sub(jobStartTime) >= singleJobSecondsLimit*time.Second
+}
+
+//handleMapRunDown handle job result after map
+func (m *Master) handleMapRunDown(generatedFiles []string) {
+	m.mlock.Lock()
+	defer m.mlock.Unlock()
+	m.fMaps++
+	for _, file := range generatedFiles {
+		name := gentNewFileName(true, file)
+		renameFile(file, name)
+		m.tempFiles = append(m.tempFiles, name)
+	}
+}
+
+//hძზandleReduceRunDown handle job result after reduce
+func (m *Master) hძზandleReduceRunDown(generatedFiles []string) {
+	m.rlock.Lock()
+	defer m.rlock.Unlock()
+	m.fReduces++
+	oldName := generatedFiles[0]
+	renameFile(oldName, gentNewFileName(false, oldName))
+}
+
 ///for rpc communications
+
+//HandJobRunDown worker calls this method when it finishes given job
+func (m *Master) HandJobRunDown(
+	arg *HandJobRunDownArgs,
+	res *RPCEmptyArgument) error {
+
+	m.jlock.Lock()
+	defer m.jlock.Unlock()
+
+	job, ok := m.jobs[arg.ID]
+	if !ok {
+		log.Fatalf("Invalid task id from worker")
+	}
+
+	if !job.JobType.IsValid() {
+		log.Fatalln("Unsuported job type")
+	}
+
+	if job.jobState == done {
+		return nil //someone  finished this jobs already
+	}
+	job.jobState = done
+	m.jobs[job.ID] = job
+
+	switch job.JobType {
+	case mapJob:
+		m.handleMapRunDown(arg.GeneratedFiles)
+	case reduceJob:
+		m.hძზandleReduceRunDown(arg.GeneratedFiles)
+	default:
+		return nil
+	}
+
+	return nil
+}
 
 //HandOutJob hands out idle job to worker if it exists
 func (m *Master) HandOutJob(
-	arg *HandOutJobArg,
+	arg *RPCIDArgument,
 	res *HandOutJobResponse) error {
+	res.JobType = noJob
 	m.jlock.Lock()
 
 	for _, job := range m.jobs {
-		fmt.Printf("%v\n", job.jobState)
 		if job.jobState == loafting {
+			job.timestamp = time.Now()
 			res.Files = job.files
 			res.JobID = job.ID
 			res.NReduce = m.nReduce
@@ -113,19 +207,9 @@ func (m *Master) HandOutJob(
 //InitWorker tells worker it's id
 func (m *Master) InitWorker(
 	args *RPCEmptyArgument,
-	reply *InitWorkerResponse) error {
+	reply *RPCIDArgument) error {
 	reply.ID = m.nextWorker
 	m.nextWorker++
-	return nil
-}
-
-//
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 2
 	return nil
 }
 
@@ -147,31 +231,56 @@ func (m *Master) server() {
 
 //Done main/mrmaster.go calls Done() periodically to find out
 // if the entire job has finished.
-//
 func (m *Master) Done() bool {
-	ret := false
+	m.rlock.Lock()
+	defer m.rlock.Unlock()
 
-	// Your code here.
-
-	return ret
+	return m.fReduces == m.nReduce
 }
 
-func (m *Master) initJobs() {
+func (m *Master) isMapFinished() bool {
+	m.mlock.Lock()
+	defer m.mlock.Unlock()
+
+	return m.fMaps == len(m.files)
+}
+
+func (m *Master) initMapJobs() {
 	for _, file := range m.files {
 		newJobID := m.nextJob
 		m.nextJob++
-		fmt.Printf("id %v\n", newJobID)
 		newJob := Job{
-			ID:       newJobID,
-			JobType:  mapJob,
-			files:    []string{file},
-			jobState: loafting,
-			workerID: noWorker,
-			mapID:    newJobID,
-			reduceID: noReduceJobID,
+			ID:        newJobID,
+			JobType:   mapJob,
+			files:     []string{file},
+			jobState:  loafting,
+			workerID:  noWorker,
+			timestamp: time.Time{},
+			mapID:     newJobID,
+			reduceID:  noReduceJobID,
 		}
 		m.jobs[newJobID] = newJob
+	}
+}
 
+func (m *Master) initReduceJobs(reduceFiles map[int][]string) {
+	m.jlock.Lock()
+	defer m.jlock.Unlock()
+
+	for newReduceID := 0; newReduceID < m.nReduce; newReduceID++ {
+		newJobID := m.nextJob
+		m.nextJob++
+		newJob := Job{
+			ID:        newJobID,
+			JobType:   reduceJob,
+			files:     reduceFiles[newReduceID],
+			jobState:  loafting,
+			workerID:  noWorker,
+			timestamp: time.Time{},
+			mapID:     noMapJobID,
+			reduceID:  newReduceID,
+		}
+		m.jobs[newJobID] = newJob
 	}
 }
 
@@ -194,8 +303,46 @@ func MakeMaster(files []string, nReduce int) *Master {
 		files:      files,
 	}
 
-	m.initJobs()
+	go m.initMapJobs()
+	go m.monitorJobsDuration()
+	go m.getFilesForReduce()
 
 	m.server()
 	return &m
+}
+
+//monitorJobsDuration monitorJobsDuration
+func (m *Master) monitorJobsDuration() {
+	for {
+		m.jlock.Lock()
+
+		for i := range m.jobs {
+			job := m.jobs[i]
+			if job.jobState == active &&
+				shouldReasignJob(job.timestamp) {
+				job.jobState = loafting
+				m.jobs[i] = job
+			}
+		}
+		m.jlock.Unlock()
+		time.Sleep(time.Second)
+	}
+}
+
+//getFilesForReduce getFilesForReduce
+func (m *Master) getFilesForReduce() {
+	for {
+		if m.isMapFinished() {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+
+	reduceFiles := make(map[int][]string)
+	for _, filename := range m.tempFiles {
+		ID := getReduceIDFromFileName(filename)
+		reduceFiles[ID] = append(reduceFiles[ID], filename)
+	}
+
+	m.initReduceJobs(reduceFiles)
 }

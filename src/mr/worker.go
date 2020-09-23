@@ -3,15 +3,14 @@ package mr
 import (
 	"fmt"
 	"hash/fnv"
-	"io/ioutil"
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
+	"time"
 )
 
-//
-// Map functions return a slice of KeyValue.
-//
+// KeyValue Map functions return a slice of KeyValue.
 type KeyValue struct {
 	Key   string
 	Value string
@@ -27,22 +26,73 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-//MapOverFile maps given func over given file's content
-func MapOverFile(
+func fillUpFileFromKeyValues(
+	reducef func(string, []string) string,
+	keyValues []KeyValue, file *os.File) {
+	sort.Sort(IKeyValueArr(keyValues))
+	i := 0
+	for i < len(keyValues) {
+		j := i + 1
+		for j < len(keyValues) && keyValues[j].Key == keyValues[i].Key {
+			j++
+		}
+		values := make([]string, 0)
+		for k := i; k < j; k++ {
+			values = append(values, keyValues[k].Value)
+		}
+		fmt.Fprintf(file, "%v %v\n", keyValues[i].Key, reducef(keyValues[i].Key, values))
+		i = j
+	}
+}
+
+//Reduce handles given reduce job
+func Reduce(
+	ID int,
+	reduceID int,
+	files []string,
+	reducef func(string, []string) string) (generatedFiles []string) {
+	keyValues := make([]KeyValue, 0)
+	for _, file := range files {
+		openedFile := openFile(file)
+
+		for {
+			k := ""
+			v := ""
+			nRead, err := fmt.Fscanf(openedFile, "%s %s", &k, &v)
+			if nRead != 2 || err != nil {
+				break
+			}
+			keyValues = append(keyValues, KeyValue{Key: k, Value: v})
+		}
+		openedFile.Close()
+	}
+
+	name := fmt.Sprintf("mr-out-%v-%v", reduceID, ID)
+	file := createFile(name)
+	fillUpFileFromKeyValues(reducef, keyValues, file)
+	file.Close()
+	generatedFiles = []string{name}
+	return
+
+}
+
+//mapOverFile maps given func over given file's content
+func mapOverFile(
 	file string,
 	mapFN func(string, string) []KeyValue,
 ) (currentKeyValue []KeyValue) {
-	openedFile, err := os.Open(file)
-	if err != nil {
-		log.Fatalln(err)
-	}
+	openedFile := openFile(file)
 	defer openedFile.Close()
 
-	r, err := ioutil.ReadAll(openedFile)
-	if err != nil {
-		log.Fatalln("error reading file for map ")
-	}
-	currentKeyValue = mapFN(file, string(r))
+	currentKeyValue = mapFN(file, readFileAsString(openedFile))
+	return
+}
+
+func generateFileName(mapID int, workerID int, keyValue KeyValue, NReduce int) (generatedFileName string) {
+	generatedFileName = fmt.Sprintf("mr-%v-%v-%v", mapID, ihash(keyValue.Key)%NReduce, workerID)
+	r := openFileWithWrite(generatedFileName)
+	fmt.Fprintf(r, "%v %v\n", keyValue.Key, keyValue.Value)
+	r.Close()
 	return
 }
 
@@ -53,105 +103,84 @@ func Map(
 	files []string, mapID int, NReduce int) (generatedFileNames []string) {
 	keyValues := make([]KeyValue, 0)
 	for _, file := range files {
-		keyValues = append(keyValues, MapOverFile(file, mapFN)...)
+		keyValues = append(keyValues, mapOverFile(file, mapFN)...)
 	}
-	generatedFileNames = make([]string, len(keyValues))
+	temp := make(map[string]bool)
 	for _, keyValue := range keyValues {
-		generatedFileName := fmt.Sprintf("mr -%v-%v-%v", mapID, ihash(keyValue.Key)%NReduce, ID)
-		r, err := os.OpenFile(generatedFileName,
-			os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			log.Fatalln(err)
-		}
-		defer r.Close()
-		generatedFileNames = append(generatedFileNames, generatedFileName)
-
-		fmt.Fprintf(r, "%v %v\n", keyValue.Key, keyValue.Value)
+		temp[generateFileName(mapID, ID, keyValue, NReduce)] = true
+	}
+	generatedFileNames = make([]string, 0)
+	for a := range temp {
+		generatedFileNames = append(generatedFileNames, a)
 	}
 	return
 }
 
-// WorkUntilDeath wants to get job
-func WorkUntilDeath(ID int) {
+// workUntilDeath asks and execs job in loop
+func workUntilDeath(
+	ID int,
+	mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string) {
 	for {
-
 		givenJob := CallHandOutJob(ID)
 
 		if !givenJob.JobType.IsValid() {
-			log.Fatalln("unsuported job type")
+			log.Fatalln("Error unsuported job type")
 		}
 
 		switch givenJob.JobType {
 		case mapJob:
-			fmt.Print("map")
+			CallHandJobRunDown(givenJob.JobID, Map(ID, mapf, givenJob.Files, givenJob.MapID, givenJob.NReduce))
 		case reduceJob:
-			fmt.Print("red")
-
+			CallHandJobRunDown(givenJob.JobID, Reduce(ID, givenJob.ReduceID, givenJob.Files, reducef))
+		default:
+			time.Sleep(time.Second)
 		}
 	}
 }
 
-//
-// main/mrworker.go calls this function.
-//
+//Worker main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 	ID := CallInit()
-	if ID == -1 {
-		log.Fatalln("pizdec")
+	workUntilDeath(ID, mapf, reducef)
+}
+
+//CallHandJobRunDown call masters handjobrundwos method
+func CallHandJobRunDown(ID int, GeneratedFiles []string) {
+	arg := HandJobRunDownArgs{}
+	arg.GeneratedFiles = GeneratedFiles
+	arg.ID = ID
+	res := RPCEmptyArgument{}
+	success := call("Master.HandJobRunDown", &arg, &res)
+	if !success {
+		log.Fatalln("Error handjubrundown")
 	}
-	WorkUntilDeath(ID)
 }
 
 //CallHandOutJob gets jobb from master if any job is loafting
 func CallHandOutJob(ID int) (res HandOutJobResponse) {
-	arg := HandOutJobArg{ID: ID}
+	arg := RPCIDArgument{ID: ID}
 	res = HandOutJobResponse{}
 
 	success := call("Master.HandOutJob", &arg, &res)
 	if !success {
-		fmt.Printf("error handmejoob")
+		log.Fatalln("Error handmejoob")
 	}
-
-	fmt.Printf("sucdsadsadcess  %v\n", res.JobID)
-
 	return
 }
 
 //CallInit gets id from master through rpc
-func CallInit() (ID int) {
+func CallInit() int {
 	arg := RPCEmptyArgument{}
-	res := InitWorkerResponse{}
+	res := RPCIDArgument{}
 
 	success := call("Master.InitWorker", &arg, &res)
 	if !success {
-		return -1
+		log.Fatalln("Error calling initworker")
 	}
-	ID = res.ID
-	return
-}
 
-//
-// example function to show how to make an RPC call to the master.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func CallExample() {
-
-	// declare an argument structure.
-	args := ExampleArgs{}
-
-	// fill in the argument(s).
-	args.X = 99
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	call("Master.Example", &args, &reply)
-
-	// reply.Y should be 100.
-	fmt.Printf("reply.Y %v\n", reply.Y)
+	return res.ID
 }
 
 //

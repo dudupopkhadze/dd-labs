@@ -11,24 +11,11 @@ import (
 	"strconv"
 )
 
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
-
-type ExampleArgs struct {
-	X int
-}
-
-type ExampleReply struct {
-	Y int
-}
-
 //RPCEmptyArgument args
 type RPCEmptyArgument struct{}
 
-//HandOutJobArg for calling master's handajob
-type HandOutJobArg struct{ ID int }
+//RPCIDArgument for calling methods with int id argument
+type RPCIDArgument struct{ ID int }
 
 //HandOutJobResponse response type from master's HandOutJob
 type HandOutJobResponse struct {
@@ -40,10 +27,10 @@ type HandOutJobResponse struct {
 	NReduce  int
 }
 
-// InitWorkerResponse response for master's InitWorker
-// returns id for this worker
-type InitWorkerResponse struct {
-	ID int
+//HandJobRunDownArgs for maters handjobrundown
+type HandJobRunDownArgs struct {
+	ID             int
+	GeneratedFiles []string
 }
 
 // Add your RPC definitions here.
