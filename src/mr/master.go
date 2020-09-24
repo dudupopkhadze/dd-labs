@@ -245,6 +245,43 @@ func (m *Master) isMapFinished() bool {
 	return m.fMaps == len(m.files)
 }
 
+//monitorJobsDuration monitorJobsDuration
+func (m *Master) monitorJobsDuration() {
+	for {
+		//get latests jobs
+		m.jlock.Lock()
+
+		for i := range m.jobs {
+			job := m.jobs[i]
+			if job.jobState == active &&
+				shouldReasignJob(job.timestamp) {
+				job.jobState = loafting
+				m.jobs[i] = job
+			}
+		}
+		m.jlock.Unlock()
+		time.Sleep(time.Second)
+	}
+}
+
+//getFilesForReduce getFilesForReduce
+func (m *Master) getFilesForReduce() {
+	for {
+		if m.isMapFinished() {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+
+	reduceFiles := make(map[int][]string)
+	for _, filename := range m.tempFiles {
+		ID := getReduceIDFromFileName(filename)
+		reduceFiles[ID] = append(reduceFiles[ID], filename)
+	}
+
+	m.initReduceJobs(reduceFiles)
+}
+
 func (m *Master) initMapJobs() {
 	for _, file := range m.files {
 		newJobID := m.nextJob
@@ -309,40 +346,4 @@ func MakeMaster(files []string, nReduce int) *Master {
 
 	m.server()
 	return &m
-}
-
-//monitorJobsDuration monitorJobsDuration
-func (m *Master) monitorJobsDuration() {
-	for {
-		m.jlock.Lock()
-
-		for i := range m.jobs {
-			job := m.jobs[i]
-			if job.jobState == active &&
-				shouldReasignJob(job.timestamp) {
-				job.jobState = loafting
-				m.jobs[i] = job
-			}
-		}
-		m.jlock.Unlock()
-		time.Sleep(time.Second)
-	}
-}
-
-//getFilesForReduce getFilesForReduce
-func (m *Master) getFilesForReduce() {
-	for {
-		if m.isMapFinished() {
-			break
-		}
-		time.Sleep(time.Second)
-	}
-
-	reduceFiles := make(map[int][]string)
-	for _, filename := range m.tempFiles {
-		ID := getReduceIDFromFileName(filename)
-		reduceFiles[ID] = append(reduceFiles[ID], filename)
-	}
-
-	m.initReduceJobs(reduceFiles)
 }
