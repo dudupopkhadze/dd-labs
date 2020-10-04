@@ -15,3 +15,8 @@
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+src/main/mrmaster
+src/main/mrmaster
+src/main/mrworker
+src/main/mrsequential
+lab1-handin.tar.gz
