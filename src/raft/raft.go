@@ -378,6 +378,13 @@ func (rf *Raft) observeElection() {
 	}
 }
 
+func (rf *Raft) pingServer(server int) {
+	args := AppendEntriesArgs{rf.term, rf.me}
+	res := AppendEntriesReply{-1, false}
+	rf.sendAppendEntries(server, &args, &res)
+	rf.parseTerm(res.Term)
+}
+
 func (rf *Raft) keepFollowersOnAlert() {
 	for {
 		if rf.status == Leader {
@@ -385,14 +392,7 @@ func (rf *Raft) keepFollowersOnAlert() {
 				if i == rf.me {
 					continue
 				}
-				go func(service int) {
-					// rf.mu.Lock()
-					// defer rf.mu.Unlock()
-					args := AppendEntriesArgs{rf.term, rf.me}
-					res := AppendEntriesReply{-1, false}
-					rf.sendAppendEntries(service, &args, &res)
-					rf.parseTerm(res.Term)
-				}(i)
+				go rf.pingServer(i)
 			}
 		}
 		time.Sleep(50 * time.Millisecond)
