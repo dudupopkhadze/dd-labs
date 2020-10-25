@@ -76,6 +76,16 @@ type AppendEntriesReply struct {
 	Conflict int
 }
 
+func (rf *Raft) getConflictIndex(args *AppendEntriesArgs) int {
+	conflict := min(rf.getIndexForNewLog(), len(args.Logs)+args.PreviousIndex+1)
+	for i := args.PreviousIndex + 1; i < rf.getIndexForNewLog() && i < len(args.Logs)+args.PreviousIndex+1; i++ {
+		if rf.getLogByIndex(i).LogTerm != args.Logs[i-args.PreviousIndex-1].LogTerm {
+			return i
+		}
+	}
+	return conflict
+}
+
 // AppendEntries f
 // currently used for pingign folowers
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -105,16 +115,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	conflictIndex := min(rf.getIndexForNewLog(), len(args.Logs)+args.PreviousIndex+1)
-	for i := args.PreviousIndex + 1; i < rf.getIndexForNewLog() && i < len(args.Logs)+args.PreviousIndex+1; i++ {
-		if rf.getLogByIndex(i).LogTerm != args.Logs[i-args.PreviousIndex-1].LogTerm {
-			conflictIndex = i
-			break
-		}
-	}
-	// if current log contains all Logs, don't truncate the log.
-	if conflictIndex != len(args.Logs)+args.PreviousIndex+1 {
-		rf.logs = append(rf.getLogsChunk(0, conflictIndex), args.Logs[conflictIndex-(args.PreviousIndex+1):]...)
+	conflict := rf.getConflictIndex(args)
+
+	if conflict != len(args.Logs)+args.PreviousIndex+1 {
+		rf.logs = append(rf.getLogsChunk(0, conflict), args.Logs[conflict-(args.PreviousIndex+1):]...)
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
@@ -449,8 +453,9 @@ func (rf *Raft) becomeLeader(currTerm int) {
 		return
 	}
 	rf.status = Leader
-	rf.nextIndexByPeers = make([]int, len(rf.peers))
-	rf.matchIndexByPeers = make([]int, len(rf.peers))
+	peersLength := len(rf.peers)
+	rf.nextIndexByPeers = createIntArray(peersLength)
+	rf.matchIndexByPeers = createIntArray(peersLength)
 	for i := range rf.nextIndexByPeers {
 		rf.nextIndexByPeers[i] = rf.getIndexForNewLog()
 	}
