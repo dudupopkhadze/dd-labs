@@ -599,14 +599,13 @@ func (rf *Raft) appendEntriesForPeers(server int) {
 			if ok && res.Succes {
 				rf.mu.Lock()
 				rf.nextIndexByPeers[server] = nextIndexForPeer + len(arg.Logs)
-				rf.matchIndexByPeers[server] = rf.nextIndexByPeers[server] + 1
+				rf.matchIndexByPeers[server] = rf.nextIndexByPeers[server] - 1
 				rf.mu.Unlock()
 				break
 			} else if !res.Succes {
 				nextIndexForPeer = res.Conflict
 			}
 		} else {
-
 			arg, leader := rf.getInstallSnapshotArgs()
 			rf.mu.Unlock()
 			if !leader {
