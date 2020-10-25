@@ -606,21 +606,21 @@ func (rf *Raft) appendEntriesForPeers(server int) {
 				nextIndexForPeer = res.Conflict
 			}
 		} else {
-			arg, leader := rf.getInstallSnapshotArgs()
-			rf.mu.Unlock()
-			if !leader {
-				return
-			}
-			reply := &InstallSnapshotReply{-1}
-			ok := rf.sendInstallSnapshot(server, arg, reply)
-			rf.evaluateTerm(reply.Term)
-			if ok {
-				rf.mu.Lock()
-				rf.nextIndexByPeers[server] = rf.logsDiff + 1
-				rf.matchIndexByPeers[server] = rf.nextIndexByPeers[server] - 1
-				rf.mu.Unlock()
-				break
-			}
+			// arg, leader := rf.getInstallSnapshotArgs()
+			// rf.mu.Unlock()
+			// if !leader {
+			// 	return
+			// }
+			// reply := &InstallSnapshotReply{-1}
+			// ok := rf.sendInstallSnapshot(server, arg, reply)
+			// rf.evaluateTerm(reply.Term)
+			// if ok {
+			// 	rf.mu.Lock()
+			// 	rf.nextIndexByPeers[server] = rf.logsDiff + 1
+			// 	rf.matchIndexByPeers[server] = rf.nextIndexByPeers[server] - 1
+			// 	rf.mu.Unlock()
+			// 	break
+			// }
 
 		}
 	}
