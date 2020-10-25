@@ -269,63 +269,15 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-type InstallSnapshotArgs struct {
-	Term              int
-	LastIncludedIndex int
-	LastIncludedTerm  int
-}
-
-type InstallSnapshotReply struct {
-	Term int
-}
-
-func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
-	rf.evaluateTerm(args.Term)
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	reply.Term = rf.term
-	if args.Term < rf.term {
-		return
-	}
-
-	if rf.getIndexForNewLog() > args.LastIncludedIndex && rf.logsDiff <= args.LastIncludedIndex &&
-		rf.getLogByIndex(args.LastIncludedIndex).LogTerm == args.LastIncludedTerm {
-		rf.logs = rf.getLogChunkToLast(args.LastIncludedIndex)
-	} else {
-		rf.logs = []ILog{ILog{args.LastIncludedTerm, nil}}
-	}
-	rf.logsDiff = args.LastIncludedIndex
-	rf.lastValidHeartbeat = true
-
-	msg := ApplyMsg{CommandIndex: args.LastIncludedIndex}
-	rf.applyChannel <- msg
-
-	rf.lastFinished = args.LastIncludedIndex
-	rf.commitIndex = args.LastIncludedIndex
-}
-
-func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
-	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
-	return ok
-}
-
-func (rf *Raft) getInstallSnapshotArgs() (*InstallSnapshotArgs, bool) {
-	args := &InstallSnapshotArgs{rf.term, rf.logsDiff, rf.logs[0].LogTerm}
-	isLeader := rf.status == Leader
-
-	return args, isLeader
-}
-
 // RequestVoteArgs s
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
-	Term         int
-	ID           int
-	LastLogIndex int
-	LastLogTerm  int
+	Term     int
+	ID       int
+	LastLog  int
+	LastTerm int
 }
 
 // RequestVoteReply s
@@ -349,8 +301,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Aprroved = false
 
 	lastIndex := rf.getIndexForNewLog() - 1
-	if rf.getLogByIndex(lastIndex).LogTerm > args.LastLogTerm ||
-		(rf.getLogByIndex(lastIndex).LogTerm == args.LastLogTerm && lastIndex > args.LastLogIndex) {
+	if rf.getLogByIndex(lastIndex).LogTerm > args.LastTerm ||
+		(rf.getLogByIndex(lastIndex).LogTerm == args.LastTerm && lastIndex > args.LastLog) {
 		return
 	}
 
@@ -499,8 +451,8 @@ func (rf *Raft) becomeLeader(currTerm int) {
 	rf.status = Leader
 	rf.nextIndexByPeers = make([]int, len(rf.peers))
 	rf.matchIndexByPeers = make([]int, len(rf.peers))
-	for idx := range rf.nextIndexByPeers {
-		rf.nextIndexByPeers[idx] = rf.getIndexForNewLog()
+	for i := range rf.nextIndexByPeers {
+		rf.nextIndexByPeers[i] = rf.getIndexForNewLog()
 	}
 }
 
@@ -560,7 +512,6 @@ func (rf *Raft) observeElection() {
 func (rf *Raft) getLogsChunk(start int, end int) []ILog {
 	normilizedStart := max(start-rf.logsDiff, 0)
 	normilizedEnd := min(end-rf.logsDiff, len(rf.logs))
-
 	return rf.logs[normilizedStart:normilizedEnd]
 }
 
@@ -574,8 +525,16 @@ func (rf *Raft) getLogByIndex(i int) ILog {
 
 func (rf *Raft) getAppendEntriesArguments(next int) (*AppendEntriesArgs, bool) {
 	logsChunk := rf.getLogChunkToLast(next)
-	arg := &AppendEntriesArgs{rf.term, rf.me, next - 1, rf.getLogByIndex(next - 1).LogTerm, logsChunk, rf.commitIndex}
+	arg := &AppendEntriesArgs{rf.term, rf.me, next - 1,
+		rf.getLogByIndex(next - 1).LogTerm, logsChunk, rf.commitIndex}
 	return arg, rf.status == Leader
+}
+
+func (rf *Raft) updateNextAndMatchIndexes(server int, nextIndex int, logsLength int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.nextIndexByPeers[server] = nextIndex + logsLength
+	rf.matchIndexByPeers[server] = rf.nextIndexByPeers[server] - 1
 }
 
 // is called only when current status is leader
@@ -597,42 +556,17 @@ func (rf *Raft) appendEntriesForPeers(server int) {
 			rf.evaluateTerm(res.Term)
 
 			if ok && res.Succes {
-				rf.mu.Lock()
-				rf.nextIndexByPeers[server] = nextIndexForPeer + len(arg.Logs)
-				rf.matchIndexByPeers[server] = rf.nextIndexByPeers[server] - 1
-				rf.mu.Unlock()
+				rf.updateNextAndMatchIndexes(server, nextIndexForPeer, len(arg.Logs))
 				break
 			} else if !res.Succes {
 				nextIndexForPeer = res.Conflict
 			}
-		} else {
-			// arg, leader := rf.getInstallSnapshotArgs()
-			// rf.mu.Unlock()
-			// if !leader {
-			// 	return
-			// }
-			// reply := &InstallSnapshotReply{-1}
-			// ok := rf.sendInstallSnapshot(server, arg, reply)
-			// rf.evaluateTerm(reply.Term)
-			// if ok {
-			// 	rf.mu.Lock()
-			// 	rf.nextIndexByPeers[server] = rf.logsDiff + 1
-			// 	rf.matchIndexByPeers[server] = rf.nextIndexByPeers[server] - 1
-			// 	rf.mu.Unlock()
-			// 	break
-			// }
-
 		}
 	}
-
-	// args := AppendEntriesArgs{rf.term, rf.me}
-	// res := AppendEntriesReply{-1, false}
-	// rf.sendAppendEntries(server, &args, &res)
-	// rf.evaluateTerm(res.Term)
 }
 
 // if leader => ping followers
-func (rf *Raft) keepFollowersOnAlert() {
+func (rf *Raft) syncLogs() {
 	for {
 		if rf.status == Leader {
 			for i := range rf.peers {
@@ -646,36 +580,44 @@ func (rf *Raft) keepFollowersOnAlert() {
 	}
 }
 
-func (rf *Raft) updateCommitIndex() {
-	rf.mu.Lock()
-	if rf.status == Leader {
-		total := len(rf.matchIndexByPeers)
-		sortedMatchIndex := make([]int, total)
-		copy(sortedMatchIndex, rf.matchIndexByPeers)
-		sort.Ints(sortedMatchIndex)
-		medianIndex := sortedMatchIndex[(total+1)/2]
+func (rf *Raft) updateCommitIndex(sortedMatchIndex []int) {
+	middle := sortedMatchIndex[((len(sortedMatchIndex) + 1) / 2)]
 
-		for medianIndex > rf.commitIndex {
-			if medianIndex < rf.getIndexForNewLog() && rf.getLogByIndex(medianIndex).LogTerm == rf.term {
-				rf.commitIndex = medianIndex
-				break
-			}
-			medianIndex--
+	for middle > rf.commitIndex {
+		if middle < rf.getIndexForNewLog() && rf.getLogByIndex(middle).LogTerm == rf.term {
+			rf.commitIndex = middle
+			break
 		}
+		middle--
 	}
-	rf.mu.Unlock()
 }
 
-func (rf *Raft) loopForApplyMsg() {
+func (rf *Raft) recalculateCommitIndex() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.status == Leader {
+		totalLength := len(rf.matchIndexByPeers)
+		temp := createIntArray(totalLength)
+		copy(temp, rf.matchIndexByPeers)
+		sort.Ints(temp)
+		rf.updateCommitIndex(temp)
+	}
+}
+
+func (rf *Raft) applyMessageIfNeeded() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for rf.lastFinished < rf.commitIndex {
+		msg := ApplyMsg{true, rf.getLogByIndex(rf.lastFinished + 1).Command, rf.lastFinished + 1}
+		rf.lastFinished++
+		rf.applyChannel <- msg
+	}
+}
+
+func (rf *Raft) applyMessages() {
 	for {
-		rf.mu.Lock()
-		for rf.lastFinished < rf.commitIndex {
-			msg := ApplyMsg{true, rf.getLogByIndex(rf.lastFinished + 1).Command, rf.lastFinished + 1}
-			rf.lastFinished++
-			rf.applyChannel <- msg
-		}
-		rf.mu.Unlock()
-		rf.updateCommitIndex()
+		rf.applyMessageIfNeeded()
+		rf.recalculateCommitIndex()
 		time.Sleep(10 * time.Millisecond)
 	}
 }
@@ -715,8 +657,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndexByPeers = createIntArray(peersLength)
 
 	go rf.observeElection()
-	go rf.keepFollowersOnAlert()
-	go rf.loopForApplyMsg()
+	go rf.syncLogs()
+	go rf.applyMessages()
 	rf.readPersist(persister.ReadRaftState())
 	return rf
 }
