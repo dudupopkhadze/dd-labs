@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"bytes"
+	"encoding/gob"
 	"math/rand"
 	"sort"
 	"sync"
@@ -74,72 +76,6 @@ type AppendEntriesReply struct {
 	Term     int
 	Succes   bool
 	Conflict int
-}
-
-func (rf *Raft) getConflictIndex(args *AppendEntriesArgs) int {
-	conflict := min(rf.getIndexForNewLog(), len(args.Logs)+args.PreviousIndex+1)
-
-	for i := args.PreviousIndex + 1; i < rf.getIndexForNewLog() && i < len(args.Logs)+args.PreviousIndex+1; i++ {
-		if rf.getLogByIndex(i).LogTerm != args.Logs[i-args.PreviousIndex-1].LogTerm {
-			return i
-		}
-	}
-
-	return conflict
-}
-
-func (rf *Raft) handleConflictEntry(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	if args.PreviousIndex < rf.logsDiff || args.PreviousIndex >= rf.getIndexForNewLog() {
-		reply.Conflict = rf.getIndexForNewLog()
-	} else {
-		i := args.PreviousIndex
-
-		targetTerm := rf.getLogByIndex(args.PreviousIndex).LogTerm
-		for i > rf.logsDiff && rf.getLogByIndex(i-1).LogTerm == targetTerm {
-			i--
-		}
-
-		reply.Conflict = i
-	}
-	reply.Succes = false
-}
-
-// AppendEntries f
-// currently used for pingign folowers
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.evaluateTerm(args.Term)
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	reply.Succes = true
-	reply.Term = rf.term
-	reply.Conflict = args.PreviousIndex
-
-	if args.Term < rf.term {
-		reply.Succes = false
-		return
-	}
-
-	if args.PreviousIndex < rf.logsDiff || args.PreviousIndex >= rf.getIndexForNewLog() || rf.getLogByIndex(args.PreviousIndex).LogTerm != args.PreviousTerm {
-		rf.handleConflictEntry(args, reply)
-		return
-	}
-
-	conflict := rf.getConflictIndex(args)
-
-	if conflict != len(args.Logs)+args.PreviousIndex+1 {
-		rf.logs = append(rf.getLogsChunk(0, conflict), args.Logs[conflict-(args.PreviousIndex+1):]...)
-	}
-
-	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = min(args.LeaderCommit, rf.getIndexForNewLog()-1)
-	}
-
-	rf.lastValidHeartbeat = true
-}
-
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
 }
 
 // ApplyMsg s
@@ -317,6 +253,34 @@ func (rf *Raft) recalculateCommitIndex() {
 	}
 }
 
+func (rf *Raft) getConflictIndex(args *AppendEntriesArgs) int {
+	conflict := min(rf.getIndexForNewLog(), len(args.Logs)+args.PreviousIndex+1)
+
+	for i := args.PreviousIndex + 1; i < rf.getIndexForNewLog() && i < len(args.Logs)+args.PreviousIndex+1; i++ {
+		if rf.getLogByIndex(i).LogTerm != args.Logs[i-args.PreviousIndex-1].LogTerm {
+			return i
+		}
+	}
+
+	return conflict
+}
+
+func (rf *Raft) handleConflictEntry(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	if args.PreviousIndex < rf.logsDiff || args.PreviousIndex >= rf.getIndexForNewLog() {
+		reply.Conflict = rf.getIndexForNewLog()
+	} else {
+		i := args.PreviousIndex
+
+		targetTerm := rf.getLogByIndex(args.PreviousIndex).LogTerm
+		for i > rf.logsDiff && rf.getLogByIndex(i-1).LogTerm == targetTerm {
+			i--
+		}
+
+		reply.Conflict = i
+	}
+	reply.Succes = false
+}
+
 ////
 
 // GetState f
@@ -336,12 +300,13 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.term)
+	e.Encode(rf.preferedCandidate)
+	e.Encode(rf.logs)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -351,19 +316,50 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&rf.term)
+	d.Decode(&rf.preferedCandidate)
+	d.Decode(&rf.logs)
+}
+
+// AppendEntries f
+// currently used for pingign folowers
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.evaluateTerm(args.Term)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.Succes = true
+	reply.Term = rf.term
+	reply.Conflict = args.PreviousIndex
+
+	if args.Term < rf.term {
+		reply.Succes = false
+		return
+	}
+
+	if args.PreviousIndex < rf.logsDiff || args.PreviousIndex >= rf.getIndexForNewLog() || rf.getLogByIndex(args.PreviousIndex).LogTerm != args.PreviousTerm {
+		rf.handleConflictEntry(args, reply)
+		return
+	}
+
+	conflict := rf.getConflictIndex(args)
+
+	if conflict != len(args.Logs)+args.PreviousIndex+1 {
+		rf.logs = append(rf.getLogsChunk(0, conflict), args.Logs[conflict-(args.PreviousIndex+1):]...)
+	}
+
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, rf.getIndexForNewLog()-1)
+	}
+
+	rf.lastValidHeartbeat = true
+	rf.persist()
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
 }
 
 // RequestVoteArgs s
@@ -380,7 +376,6 @@ type RequestVoteArgs struct {
 // RequestVoteReply s
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
-//
 type RequestVoteReply struct {
 	Term     int
 	Aprroved bool
@@ -388,7 +383,6 @@ type RequestVoteReply struct {
 
 // RequestVote f
 // example RequestVote RPC handler.
-//
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.evaluateTerm(args.Term)
 	rf.mu.Lock()
@@ -412,9 +406,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.status == Follower {
 		rf.lastValidHeartbeat = true
 	}
+	rf.persist()
 }
 
-//
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
@@ -448,7 +442,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-//
+// Start method
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -481,13 +475,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = rf.getIndexForNewLog()
 
 		rf.logs = append(rf.logs, curLog)
+		rf.persist()
 	}
 
 	return index, term, isLeader
 }
 
-//
-// the tester doesn't halt goroutines created by Raft after each test,
+//Kill  the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
 // check whether Kill() has been called. the use of atomic avoids the
 // need for a lock.
@@ -517,6 +511,7 @@ func (rf *Raft) evaluateTerm(term int) {
 		rf.status = Follower
 		rf.preferedCandidate = noPreferedCandidate
 		rf.term = term
+		rf.persist()
 	}
 }
 
@@ -564,6 +559,7 @@ func (rf *Raft) nominateSelfAsCandidate() {
 	rf.status = Candidate
 	rf.term++
 	rf.preferedCandidate = rf.me
+	rf.persist()
 	go rf.startElection(rf.term)
 }
 
@@ -636,6 +632,7 @@ func (rf *Raft) applyMessageIfNeeded() {
 	}
 }
 
+// appply messages if last finished < commit indetx
 func (rf *Raft) applyMessages() {
 	for {
 		rf.applyMessageIfNeeded()
