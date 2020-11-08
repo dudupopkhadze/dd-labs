@@ -501,7 +501,6 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-//
 //analyzes given term
 //if term is greates then our current term -> our  term/status are updated
 func (rf *Raft) evaluateTerm(term int) {
@@ -539,6 +538,7 @@ func (rf *Raft) requestVoteFromServer(server int, channel *chan bool, request *R
 // requests vote from every other server
 //-> counts them
 //-> becomes leader if can
+// be better than cesco
 func (rf *Raft) startElection(currTerm int) {
 	request := RequestVoteArgs{currTerm, rf.me, rf.getIndexForNewLog() - 1, rf.getLogByIndex(rf.getIndexForNewLog() - 1).LogTerm}
 	channel := make(chan bool)
