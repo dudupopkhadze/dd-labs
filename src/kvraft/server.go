@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 )
 
-//Result s
-type Result struct {
+//OPRes s
+type OPRes struct {
 	OpIndex int64
 	Value   string
 }
@@ -26,37 +26,41 @@ type Op struct {
 
 //KVServer struct
 type KVServer struct {
-	mu      sync.Mutex
+	lock      sync.Mutex
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
 	dead    int32 // set by Kill()
-
 	maxraftstate int // snapshot if log grows this big
 
 	data                map[string]string
-	callbackCh          map[int64]chan Result // [Client] result
-	lastCommitedOpIndex map[int64]int64
+	cb          map[int64]chan OPRes 
+	lastOperation map[int64]int64
+	lastLog int
+}
 
-	lastCommitedLogIndex int
+
+func(kv *KVServer) startRaftForGet(args *GetArgs, reply *GetReply){
+	reply.InvalidLeader = false
+	kv.lock.Lock()
+	
+	if _, ok := kv.cb[args.Client]; !ok {
+		kv.cb[args.Client] = make(chan OPRes)
+	}
+
+	kv.lock.Unlock()
+	kv.rf.Start(Op{args.Key, "", args.Client, "Get", args.OpIndex})
 }
 
 //Get hendler
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	_, isLeader := kv.rf.GetState()
-
+	
 	if isLeader {
-		reply.InvalidLeader = false
-		kv.mu.Lock()
-		if _, ok := kv.callbackCh[args.Client]; !ok {
-			kv.callbackCh[args.Client] = make(chan Result)
-		}
-		kv.mu.Unlock()
-
-		kv.rf.Start(Op{args.Key, "", args.Client, "Get", args.OpIndex})
+		kv.startRaftForGet(args,reply)
 
 		select {
-		case res := <-kv.callbackCh[args.Client]:
+		case res := <-kv.cb[args.Client]:
 			if res.OpIndex == args.OpIndex {
 				if res.Value != "" {
 					reply.Err = OK
@@ -71,25 +75,30 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	} else {
 		reply.InvalidLeader = true
 	}
-
 }
+
+func (kv * KVServer) startRaftForPutAppend(args *PutAppendArgs, reply *PutAppendReply){
+	reply.InvalidLeader = false
+	kv.lock.Lock()
+	
+	if _, ok := kv.cb[args.Client]; !ok {
+		kv.cb[args.Client] = make(chan OPRes)
+	}
+
+	kv.lock.Unlock()
+	kv.rf.Start(Op{args.Key, args.Value, args.Client, args.Op, args.OpIndex})
+}
+
 
 //PutAppend hendler
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	_, isLeader := kv.rf.GetState()
 
 	if isLeader {
-		reply.InvalidLeader = false
-		kv.mu.Lock()
-		if _, ok := kv.callbackCh[args.Client]; !ok {
-			kv.callbackCh[args.Client] = make(chan Result)
-		}
-		kv.mu.Unlock()
-
-		kv.rf.Start(Op{args.Key, args.Value, args.Client, args.Op, args.OpIndex})
+		kv.startRaftForPutAppend(args,reply)
 
 		select {
-		case res := <-kv.callbackCh[args.Client]:
+		case res := <-kv.cb[args.Client]:
 			if res.OpIndex >= args.OpIndex {
 				reply.Err = OK
 			}
@@ -99,7 +108,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	} else {
 		reply.InvalidLeader = true
 	}
-
 }
 
 //Kill a
@@ -121,6 +129,14 @@ func (kv *KVServer) Kill() {
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
+}
+
+func (kv *KVServer) init(servers []*labrpc.ClientEnd, me int, persister *raft.Persister){
+	kv.data = make(map[string]string)
+	kv.cb = make(map[int64]chan OPRes)
+	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.lastOperation = make(map[int64]int64)
 }
 
 // StartKVServer f
@@ -146,54 +162,50 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
+	kv.init(servers,me,persister)
 
-	kv.data = make(map[string]string)
-	kv.callbackCh = make(map[int64]chan Result)
-	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	kv.lastCommitedOpIndex = make(map[int64]int64)
-
-	go kv.loopForApplyMsg()
+	go kv.applyMessagesLoop()
 	return kv
 }
 
-//ApplyCommand h
-func (kv *KVServer) ApplyCommand(command Op) Result {
-	result := Result{command.OpIndex, ""}
+func (kv *KVServer) applyMessagesLoop() {
+	for {
+		msg := <-kv.applyCh
+		command := msg.Command.(Op)
+		res := kv.ApplyCommand(command)
 
-	if kv.lastCommitedOpIndex[command.Client] < command.OpIndex {
-		
-		switch command.OpType {
-		case "Put":
-			kv.data[command.Key] = command.Value
-		case "Append":
-			kv.data[command.Key] += command.Value
+		if msg.CommandIndex > kv.lastLog {
+			kv.lastLog = msg.CommandIndex
 		}
-		
-		kv.lastCommitedOpIndex[command.Client] = command.OpIndex
+		select {
+		case kv.cb[command.Client] <- res:
+		default:
+		}
 	}
+}
+
+func (kv * KVServer) updateDataByCommand(command Op){
+	switch command.OpType {
+	case "Put":
+		kv.data[command.Key] = command.Value
+	case "Append":
+		kv.data[command.Key] += command.Value
+	}
+	kv.lastOperation[command.Client] = command.OpIndex
+}
+
+//ApplyCommand h
+func (kv *KVServer) ApplyCommand(command Op) OPRes {
+	result := OPRes{command.OpIndex, ""}
+
+	if kv.lastOperation[command.Client] < command.OpIndex {
+		kv.updateDataByCommand(command)
+	}
+
 	if val, ok := kv.data[command.Key]; ok {
 		result.Value = val
 	}
 	return result
-}
-
-
-func (kv *KVServer) loopForApplyMsg() {
-	for {
-		msg := <-kv.applyCh
-	
-		command := msg.Command.(Op)
-		res := kv.ApplyCommand(command)
-		if msg.CommandIndex > kv.lastCommitedLogIndex {
-			kv.lastCommitedLogIndex = msg.CommandIndex
-		}
-		select {
-		case kv.callbackCh[command.Client] <- res:
-		default:
-		}
-
-	}
 }
 
 
