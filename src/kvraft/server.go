@@ -9,14 +9,13 @@ import (
 	"sync/atomic"
 )
 
-
+//Result s
 type Result struct {
 	OpIndex int64
 	Value   string
 }
 
-
-
+// Op s
 type Op struct {
 	Key      string
 	Value    string
