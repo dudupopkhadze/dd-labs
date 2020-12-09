@@ -1,30 +1,31 @@
 package kvraft
 
 import (
+	"time"
 	"../labgob"
 	"../labrpc"
-	"log"
 	"../raft"
 	"sync"
 	"sync/atomic"
 )
 
-const Debug = 0
 
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
+type Result struct {
+	OpIndex int64
+	Value   string
 }
+
 
 
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Key      string
+	Value    string
+	Client int64
+	OpType   string
+	OpIndex  int64
 }
 
+//KVServer struct
 type KVServer struct {
 	mu      sync.Mutex
 	me      int
@@ -34,19 +35,75 @@ type KVServer struct {
 
 	maxraftstate int // snapshot if log grows this big
 
-	// Your definitions here.
+	data                map[string]string
+	callbackCh          map[int64]chan Result // [Client] result
+	lastCommitedOpIndex map[int64]int64
+
+	lastCommitedLogIndex int
 }
 
-
+//Get hendler
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	_, isLeader := kv.rf.GetState()
+
+	if isLeader {
+		reply.InvalidLeader = false
+		kv.mu.Lock()
+		if _, ok := kv.callbackCh[args.Client]; !ok {
+			kv.callbackCh[args.Client] = make(chan Result)
+		}
+		kv.mu.Unlock()
+
+		kv.rf.Start(Op{args.Key, "", args.Client, "Get", args.OpIndex})
+
+		select {
+		case res := <-kv.callbackCh[args.Client]:
+			if res.OpIndex == args.OpIndex {
+				if res.Value != "" {
+					reply.Err = OK
+					reply.Value = res.Value
+				} else {
+					reply.Err = ErrNoKey
+				}
+			}
+		case <-time.After(2 * time.Second):
+			reply.Err = TimeOut
+		}
+	} else {
+		reply.InvalidLeader = true
+	}
+
 }
 
+//PutAppend hendler
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	_, isLeader := kv.rf.GetState()
+
+	if isLeader {
+		reply.InvalidLeader = false
+		kv.mu.Lock()
+		if _, ok := kv.callbackCh[args.Client]; !ok {
+			kv.callbackCh[args.Client] = make(chan Result)
+		}
+		kv.mu.Unlock()
+
+		kv.rf.Start(Op{args.Key, args.Value, args.Client, args.Op, args.OpIndex})
+
+		select {
+		case res := <-kv.callbackCh[args.Client]:
+			if res.OpIndex >= args.OpIndex {
+				reply.Err = OK
+			}
+		case <-time.After(2 * time.Second):
+			reply.Err = TimeOut
+		}
+	} else {
+		reply.InvalidLeader = true
+	}
+
 }
 
-//
+//Kill a
 // the tester calls Kill() when a KVServer instance won't
 // be needed again. for your convenience, we supply
 // code to set rf.dead (without needing a lock),
@@ -67,7 +124,7 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
-//
+// StartKVServer f
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
 // form the fault-tolerant key/value service.
@@ -90,12 +147,54 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
-	// You may need initialization code here.
 
+	kv.data = make(map[string]string)
+	kv.callbackCh = make(map[int64]chan Result)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.lastCommitedOpIndex = make(map[int64]int64)
 
-	// You may need initialization code here.
-
+	go kv.loopForApplyMsg()
 	return kv
 }
+
+//ApplyCommand h
+func (kv *KVServer) ApplyCommand(command Op) Result {
+	result := Result{command.OpIndex, ""}
+
+	if kv.lastCommitedOpIndex[command.Client] < command.OpIndex {
+		
+		switch command.OpType {
+		case "Put":
+			kv.data[command.Key] = command.Value
+		case "Append":
+			kv.data[command.Key] += command.Value
+		}
+		
+		kv.lastCommitedOpIndex[command.Client] = command.OpIndex
+	}
+	if val, ok := kv.data[command.Key]; ok {
+		result.Value = val
+	}
+	return result
+}
+
+
+func (kv *KVServer) loopForApplyMsg() {
+	for {
+		msg := <-kv.applyCh
+	
+		command := msg.Command.(Op)
+		res := kv.ApplyCommand(command)
+		if msg.CommandIndex > kv.lastCommitedLogIndex {
+			kv.lastCommitedLogIndex = msg.CommandIndex
+		}
+		select {
+		case kv.callbackCh[command.Client] <- res:
+		default:
+		}
+
+	}
+}
+
+
