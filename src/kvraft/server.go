@@ -1,6 +1,8 @@
 package kvraft
 
 import (
+	"encoding/gob"
+	"bytes"
 	"time"
 	"../labgob"
 	"../labrpc"
@@ -171,16 +173,28 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 func (kv *KVServer) applyMessagesLoop() {
 	for {
 		msg := <-kv.applyCh
-		command := msg.Command.(Op)
-		res := kv.ApplyCommand(command)
-
-		if msg.CommandIndex > kv.lastLog {
+		if msg.UseSnapshot {
+			data := msg.Snapshot
+			kv.deserializeSnapshot(data)
 			kv.lastLog = msg.CommandIndex
+		} else {
+			command := msg.Command.(Op)
+			res := kv.ApplyCommand(command)
+
+			if msg.CommandIndex > kv.lastLog {
+				kv.lastLog = msg.CommandIndex
+			}
+			select {
+			case kv.cb[command.Client] <- res:
+			default:
+			}
+
+			if kv.maxraftstate != -1 && kv.rf.GetStateSize() >= kv.maxraftstate {
+				data := kv.serializeSnapshot()
+				go kv.rf.UpdateSnapshot(data, kv.lastLog)
+			}
 		}
-		select {
-		case kv.cb[command.Client] <- res:
-		default:
-		}
+
 	}
 }
 
@@ -206,6 +220,21 @@ func (kv *KVServer) ApplyCommand(command Op) OPRes {
 		result.Value = val
 	}
 	return result
+}
+
+func (kv *KVServer) serializeSnapshot() []byte {
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(kv.data)
+	e.Encode(kv.lastOperation)
+	return w.Bytes()
+}
+
+func (kv *KVServer) deserializeSnapshot(data []byte) {
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&kv.data)
+	d.Decode(&kv.lastOperation)
 }
 
 
