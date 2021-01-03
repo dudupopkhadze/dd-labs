@@ -1,3 +1,4 @@
+
 package raft
 
 //
@@ -93,6 +94,8 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	UseSnapshot bool   
+	Snapshot    []byte
 }
 
 // Raft s
@@ -120,6 +123,7 @@ type Raft struct {
 	matchIndexByPeers []int
 
 	applyChannel chan ApplyMsg
+	snapshotData []byte
 }
 
 //helper functions
@@ -626,7 +630,7 @@ func (rf *Raft) applyMessageIfNeeded() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	for rf.lastFinished < rf.commitIndex {
-		msg := ApplyMsg{true, rf.getLogByIndex(rf.lastFinished + 1).Command, rf.lastFinished + 1}
+		msg := ApplyMsg{true, rf.getLogByIndex(rf.lastFinished + 1).Command, rf.lastFinished + 1,false,[]byte{}}
 		rf.lastFinished++
 		rf.applyChannel <- msg
 	}
@@ -640,6 +644,103 @@ func (rf *Raft) applyMessages() {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func (rf *Raft) GetStateSize() int {
+	return rf.persister.RaftStateSize()
+}
+
+type Snapshot struct {
+	Data              []byte
+	LastIncludedIndex int
+	LastIncludedTerm  int
+}
+
+func (rf *Raft) readSnapshot(data []byte) {
+	if data == nil || len(data) < 1 {
+		return
+	}
+	snapshot := Snapshot{[]byte{}, 0, 0}
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&snapshot)
+
+	rf.logsDiff = snapshot.LastIncludedIndex
+	rf.lastFinished = snapshot.LastIncludedIndex
+	rf.commitIndex = snapshot.LastIncludedIndex
+	rf.snapshotData = snapshot.Data
+
+	msg := ApplyMsg{CommandIndex: snapshot.LastIncludedIndex, UseSnapshot: true, Snapshot: snapshot.Data}
+	go func() {
+		rf.applyChannel <- msg
+	}()
+}
+
+func (rf *Raft) UpdateSnapshot(data []byte, index int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if index < rf.logsDiff || index >= rf.getIndexForNewLog() {
+		return
+	}
+	rf.snapshotData = data
+	rf.logs = rf.getLogChunkToLast(index)
+	rf.logsDiff = index
+	rf.lastFinished = index
+	rf.saveSnapshot()
+	rf.persist()
+}
+
+func (rf *Raft) saveSnapshot() {
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(Snapshot{rf.snapshotData, rf.logsDiff, rf.logs[0].LogTerm})
+	rf.persister.SaveStateAndSnapshot([]byte{},w.Bytes())
+}
+
+type InstallSnapshotArgs struct {
+	Term              int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.evaluateTerm(args.Term)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	reply.Term = rf.term
+	if args.Term < rf.term {
+		return
+	}
+
+	if rf.getIndexForNewLog() > args.LastIncludedIndex && rf.logsDiff <= args.LastIncludedIndex &&
+		rf.getLogByIndex(args.LastIncludedIndex).LogTerm == args.LastIncludedTerm {
+		rf.logs = rf.getLogChunkToLast(args.LastIncludedIndex)
+	} else {
+		rf.logs = []ILog{ILog{args.LastIncludedTerm, nil}}
+	}
+	rf.logsDiff = args.LastIncludedIndex
+	rf.lastValidHeartbeat = true
+
+	msg := ApplyMsg{CommandIndex: args.LastIncludedIndex, UseSnapshot: true, Snapshot: args.Data}
+
+	rf.applyChannel <- msg
+	rf.lastFinished = args.LastIncludedIndex
+	rf.commitIndex = args.LastIncludedIndex
+	rf.snapshotData = args.Data
+	rf.persist()
+	rf.saveSnapshot()
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
+}
+
 
 // Make fun
 // the service or tester wants to create a Raft server. the ports
@@ -674,6 +775,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.nextIndexByPeers = createIntArray(peersLength)
 	rf.matchIndexByPeers = createIntArray(peersLength)
+	rf.readSnapshot(persister.ReadSnapshot())
 
 	go rf.observeElection()
 	go rf.syncLogs()
